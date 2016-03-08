@@ -19,11 +19,12 @@
  * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  ******************************************************************************
- * read_dev.c
+ * lepton.cpp
  *
  *  Created on: Mar 5, 2016
  *      Author: Charles Allen
  */
+
 #include <fcntl.h>
 #include <error.h>
 #include <errno.h>
@@ -32,18 +33,25 @@
 #include <unistd.h>
 #include <stdio.h>
 #include <mraa.h>
-#include <string.h>
+#include <string>
 #include <arpa/inet.h>
+#include <opencv2/opencv.hpp>
+#include <opencv2/imgproc/imgproc.hpp>
+#include <opencv2/video/video.hpp>
+
+using namespace cv;
+using namespace std;
 
 static const char *dev_name = "/dev/lepton";
 void sig_handler(int signum);
 static sig_atomic_t volatile isrunning = 1;
+uint32_t frame_counter = 0;
 #define exitIfMRAAError(x) exitIfMRAAError_internal(x, __FILE__, __LINE__)
 
 static void exitIfMRAAError_internal(mraa_result_t result, const char *filename,
 		unsigned int linenum) {
 	if (__builtin_expect(result != MRAA_SUCCESS, 0)) {
-		char *errMsg = NULL;
+		const char *errMsg = NULL;
 		switch (result) {
 		case MRAA_ERROR_FEATURE_NOT_IMPLEMENTED:
 			errMsg = "MRAA_ERROR_FEATURE_NOT_IMPLEMENTED";
@@ -133,13 +141,14 @@ static int captureImage(uint16_t *image, mraa_gpio_context cs, int fd) {
 }
 
 // image is still BigEndian when it gets here
-static void printImg(uint16_t *image, FILE *out_fd) {
+static void printImg(uint16_t *image, VideoWriter &videoWriter) {
+	//char fname[128];
 	uint16_t min_v = (uint16_t) -1;
 	uint16_t max_v = 0;
 	for (int i = 0; i < 60; ++i) {
 		uint16_t *line = &image[i * 80];
 		for (int j = 0; j < 78/*80*/; ++j) {
-			uint16_t v = line[j]= ntohs(line[j]);
+			uint16_t v = line[j] = ntohs(line[j]);
 			if (__builtin_expect(v > max_v, 0)) {
 				max_v = v;
 			}
@@ -148,21 +157,25 @@ static void printImg(uint16_t *image, FILE *out_fd) {
 			}
 		}
 	}
-	// gst-launch-1.0 filesrc file://video ! video/x-raw,format=GRAY16_LE,width=80,height=60,framerate=9/1 ! videoconvert ! theoraenc ! oggmux ! queue ! tcpserversink port=8080
-	//fprintf(out_fd, "P2\n80 60\n%d\n", max_v - min_v);
+	// gst-launch-1.0 filesrc location=video.avi ! avidemux ! jpegdec ! theoraenc ! queue ! rtptheorapay config-interval=2 ! udpsink host=192.168.1.105 port=8554
+	uint16_t scale = max_v - min_v;
+	Mat grayScaleImage(60, 80, CV_8UC1);
 	for (int i = 0; i < 60; ++i) {
-		uint16_t *line = &image[i * 80];
+		const int idex = i * 80;
+		uint16_t *line = &image[idex];
+		uint8_t *line8 = &grayScaleImage.data[idex];
 		for (int j = 0; j < 78/*80*/; ++j) {
-			line[j] -= min_v;
-			//fprintf(out_fd, "%d ", (int) v);
+			line8[j] = (((line[j] - min_v)<<8) / scale) & 0xFF;
 		}
-		line[78] = 0;
-		line[79] = 0;
-		fwrite(line, sizeof(uint16_t), 80, out_fd);
-		//fprintf(out_fd, "0 0");
-		//fprintf(out_fd, "\n");
+		line8[78] = line8[79] = 0;
 	}
-	//fprintf(out_fd, "\n\n");
+	try {
+		videoWriter << grayScaleImage;
+	}catch (cv::Exception &ex) {
+		std::cout << "Error writing video frame" << std::endl << ex.what() << std::endl;
+		isrunning = 0;
+	}
+	//isrunning = 0;
 }
 
 int main(int argc, char **argv) {
@@ -170,6 +183,7 @@ int main(int argc, char **argv) {
 	uint32_t frameNum = 0;
 	uint16_t image[80 * 60];
 	mraa_gpio_context cs;
+	Size size(80, 60);
 	signal(SIGINT, &sig_handler);
 	cs = mraa_gpio_init(45);
 	if (cs == NULL) {
@@ -183,6 +197,15 @@ int main(int argc, char **argv) {
 	if (fd == -1) {
 		error(-1, errno, "Error opening %s", dev_name);
 	}
+	printf("Linking video\n");
+	VideoWriter videoWriter;
+	if (!videoWriter.open(
+			"/home/root/video.avi",
+			CV_FOURCC('M', 'J', 'P', 'G'),
+			9.0, size, 0) || !videoWriter.isOpened()) {
+		error(-1, 0, "Error opening video");
+	}
+
 	printf("Activating Lepton...\n");
 	exitIfMRAAError(mraa_gpio_write(cs, 0)); // Select device
 	while (isrunning) {
@@ -193,13 +216,15 @@ int main(int argc, char **argv) {
 			exitIfMRAAError(mraa_gpio_write(cs, 0)); // Select device
 		} else {
 			if (frameNum++ % 3 == 0) {
-				printImg(image, stderr);
+				printImg(image, videoWriter);
 			}
 		}
 	}
 	exitIfMRAAError(mraa_gpio_write(cs, 1)); // High to de-select
 	exitIfMRAAError(mraa_gpio_close(cs));
 	close(fd);
+	printf("Finalizing video\n");
+	//videoWriter.release();
 	return 0;
 }
 

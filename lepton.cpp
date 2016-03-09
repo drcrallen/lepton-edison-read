@@ -21,7 +21,7 @@
  ******************************************************************************
  * lepton.cpp
  *
- *  Created on: Mar 5, 2016
+ *  Created on: Mar 7, 2016
  *      Author: Charles Allen
  */
 
@@ -35,9 +35,12 @@
 #include <mraa.h>
 #include <string>
 #include <arpa/inet.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netinet/ip.h>
 #include <opencv2/opencv.hpp>
 #include <opencv2/imgproc/imgproc.hpp>
-#include <opencv2/video/video.hpp>
 
 using namespace cv;
 using namespace std;
@@ -140,9 +143,26 @@ static int captureImage(uint16_t *image, mraa_gpio_context cs, int fd) {
 	return retval;
 }
 
+#define BOUNDARY "hfihuuhf782hf4278fh2h4f7842hfh87942h"
+
+static const char boundary_end_str[] = "\r\n--" BOUNDARY "\r\n";
+
+static int safe_write(int fd, uint8_t *ptr, ssize_t len) {
+	for (ssize_t write_remaining = len, my_write = 0; write_remaining > 0;
+			write_remaining -= my_write) {
+		my_write = write(fd, ptr, write_remaining);
+		if (__builtin_expect(-1 == my_write, 0)) {
+			// Skip things like EAGAIN for now
+			error(0, errno, "Error writing image data");
+			return -1;
+		}
+		ptr = &ptr[my_write];
+	}
+	return len;
+}
+
 // image is still BigEndian when it gets here
-static void printImg(uint16_t *image, VideoWriter &videoWriter) {
-	//char fname[128];
+static int printImg(uint16_t *image, int out_fd) {
 	uint16_t min_v = (uint16_t) -1;
 	uint16_t max_v = 0;
 	for (int i = 0; i < 60; ++i) {
@@ -157,25 +177,50 @@ static void printImg(uint16_t *image, VideoWriter &videoWriter) {
 			}
 		}
 	}
-	// gst-launch-1.0 filesrc location=video.avi ! avidemux ! jpegdec ! theoraenc ! queue ! rtptheorapay config-interval=2 ! udpsink host=192.168.1.105 port=8554
+
 	uint16_t scale = max_v - min_v;
 	Mat grayScaleImage(60, 80, CV_8UC1);
+	uint8_t *img_out = (uint8_t *) &grayScaleImage.data[0];
 	for (int i = 0; i < 60; ++i) {
 		const int idex = i * 80;
 		uint16_t *line = &image[idex];
-		uint8_t *line8 = &grayScaleImage.data[idex];
+		uint8_t *line_out = &img_out[idex];
 		for (int j = 0; j < 78/*80*/; ++j) {
-			line8[j] = (((line[j] - min_v)<<8) / scale) & 0xFF;
+			line_out[j] = (((line[j] - min_v) << 8) / scale) & 0xFF;
 		}
-		line8[78] = line8[79] = 0;
+		line_out[78] = line_out[79] = 0;
 	}
+
+	uint8_t strbuff[1024];
+
+	std::vector<uchar> buff;
 	try {
-		videoWriter << grayScaleImage;
-	}catch (cv::Exception &ex) {
-		std::cout << "Error writing video frame" << std::endl << ex.what() << std::endl;
-		isrunning = 0;
+		if (!imencode(".jpeg", grayScaleImage, buff)) {
+			error(0, 0, "Error writing jpeg image to buffer");
+			return -1;
+		}
+	} catch (cv::Exception &ex) {
+		std::cout << "Error writing image: " <<ex.what() << std::endl;
+		return -1;
 	}
-	//isrunning = 0;
+
+	ssize_t out_str_len = snprintf((char *) strbuff, sizeof(strbuff),
+			"Content-Type: image/jpeg\r\nContent-Length: %d\r\n\r\n", buff.size());
+	if (out_str_len < 0) {
+		error(0, errno, "Error writing output header");
+		return -1;
+	}
+	if (safe_write(out_fd, strbuff, out_str_len) < 0) {
+		return -1;
+	}
+	if (safe_write(out_fd, buff.data(), buff.size()) < 0) {
+		return -1;
+	}
+	if (safe_write(out_fd, (uint8_t *) boundary_end_str,
+			sizeof(boundary_end_str) - 1) < 0) {
+		return -1;
+	}
+	return 0;
 }
 
 int main(int argc, char **argv) {
@@ -184,6 +229,25 @@ int main(int argc, char **argv) {
 	uint16_t image[80 * 60];
 	mraa_gpio_context cs;
 	Size size(80, 60);
+
+	socklen_t sin_size = sizeof(struct sockaddr_in);
+	int socket_fd = socket(PF_INET, SOCK_STREAM, 0);
+	struct sockaddr_in sin, their_sin;
+	sin.sin_family = AF_INET;
+	inet_aton("192.168.1.139", &sin.sin_addr);
+	//sin.sin_addr.s_addr = INADDR_ANY;
+	sin.sin_port = htons(8888);
+	memset(&(sin.sin_zero), '\0', 8);
+	if (-1
+			== bind(socket_fd, (const struct sockaddr *) &sin,
+					sizeof(sockaddr_in))) {
+		error(-1, errno, "Error binding to 8888");
+	}
+
+	if (-1 == listen(socket_fd, 1)) {
+		error(-1, errno, "Error listening");
+	}
+
 	signal(SIGINT, &sig_handler);
 	cs = mraa_gpio_init(45);
 	if (cs == NULL) {
@@ -197,34 +261,51 @@ int main(int argc, char **argv) {
 	if (fd == -1) {
 		error(-1, errno, "Error opening %s", dev_name);
 	}
-	printf("Linking video\n");
-	VideoWriter videoWriter;
-	if (!videoWriter.open(
-			"/home/root/video.avi",
-			CV_FOURCC('M', 'J', 'P', 'G'),
-			9.0, size, 0) || !videoWriter.isOpened()) {
-		error(-1, 0, "Error opening video");
-	}
 
 	printf("Activating Lepton...\n");
-	exitIfMRAAError(mraa_gpio_write(cs, 0)); // Select device
+	int out_fd = -1;
 	while (isrunning) {
-		if (captureImage(image, cs, fd) < 0) {
+		if (-1 == out_fd || captureImage(image, cs, fd) < 0) {
 			exitIfMRAAError(mraa_gpio_write(cs, 1)); // High to de-select
+			while (-1 == out_fd && isrunning) {
+				out_fd = accept(socket_fd, (struct sockaddr *) &their_sin,
+						&sin_size);
+				if (-1 == out_fd) {
+					error(0, errno, "Error accepting socket, retrying");
+				} else {
+					char out_buffer[4096] = { 0 };
+					snprintf(out_buffer, sizeof(out_buffer),
+							"HTTP/1.0 20 OK\r\n"
+									"Content-Type: multipart/x-mixed-replace;boundary=" BOUNDARY "\r\n"
+							"\r\n--" BOUNDARY "\r\n");
+					int len = strlen(out_buffer);
+					if (len != write(out_fd, out_buffer, len)) {
+						error(0, 0, "Error writing bytes");
+						close(out_fd);
+						out_fd = -1;
+					}
+				}
+			};
 			frameNum = 0;
+			// Actually only needs to be ~185ms
 			usleep(200000);
 			exitIfMRAAError(mraa_gpio_write(cs, 0)); // Select device
 		} else {
 			if (frameNum++ % 3 == 0) {
-				printImg(image, videoWriter);
+				if (-1 == printImg(image, out_fd)) {
+					error(0, 0, "Problem with socket, closing. %s", isrunning ? "" : "Also is done");
+					close(out_fd);
+					out_fd = -1;
+				}
 			}
 		}
 	}
 	exitIfMRAAError(mraa_gpio_write(cs, 1)); // High to de-select
 	exitIfMRAAError(mraa_gpio_close(cs));
+	if (out_fd != -1) {
+		close(out_fd);
+	}
 	close(fd);
-	printf("Finalizing video\n");
-	//videoWriter.release();
 	return 0;
 }
 

@@ -15,6 +15,8 @@ Read from the FLIR Lepton using the Intel Edison
 
 # Running
 
+1. Hook up the Lepton to SPI bus 5.
+1. Hook up the Lepton CS` to pin 45. (this is [hard-coded](https://github.com/drcrallen/lepton-edison-read/blob/093154cd713475ad1b833be63a72996c1556c73b/lepton.cpp#L251) currently)
 1. The DMA patch set and lepton module should be running on the edison.
 1. Run the executable on the edison
 1. The expected output is at the end of this section

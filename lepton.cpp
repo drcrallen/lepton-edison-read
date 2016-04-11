@@ -32,15 +32,24 @@
 #include <signal.h>
 #include <unistd.h>
 #include <stdio.h>
-#include <mraa.h>
+#include <mraa.hpp>
 #include <string>
+#include <linux/i2c-dev.h>
 #include <arpa/inet.h>
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <sys/ioctl.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <netinet/ip.h>
 #include <opencv2/opencv.hpp>
 #include <opencv2/imgproc/imgproc.hpp>
+
+// Something doesn't translate properly to VLC
+//#define USE_16BIT_GRAY_RAW
+
+// Attempt to auto-scale the data
+#define AUTO_SCALE
 
 using namespace cv;
 using namespace std;
@@ -51,7 +60,7 @@ static sig_atomic_t volatile isrunning = 1;
 uint32_t frame_counter = 0;
 #define exitIfMRAAError(x) exitIfMRAAError_internal(x, __FILE__, __LINE__)
 
-static void exitIfMRAAError_internal(mraa_result_t result, const char *filename,
+static void exitIfMRAAError_internal(int result, const char *filename,
 		unsigned int linenum) {
 	if (__builtin_expect(result != MRAA_SUCCESS, 0)) {
 		const char *errMsg = NULL;
@@ -103,6 +112,17 @@ static void exitIfMRAAError_internal(mraa_result_t result, const char *filename,
 	}
 }
 
+/**
+ static void exitIfMRAAError_internal(mraa::Result result, const char *filename,
+ unsigned int linenum) {
+ exitIfMRAAError_internal((int) result, filename, linenum);
+ }
+ static void exitIfMRAAError_internal(mraa_result_t result, const char *filename,
+ unsigned int linenum) {
+ exitIfMRAAError_internal((int) result, filename, linenum);
+ }
+ **/
+
 static int captureImage(uint16_t *image, mraa_gpio_context cs, int fd) {
 	const int line_len = 164;
 	int result, i = 0, retval = 0;
@@ -129,6 +149,10 @@ static int captureImage(uint16_t *image, mraa_gpio_context cs, int fd) {
 				break;
 			}
 			++i;
+		} else {
+			// Each line is 1/27/60 of a second's worth of data, which is ~617us. We sleep for 1/12th of this time between tries for a new line.
+			usleep(50);
+			;
 		}
 	}
 	retval = i - 60;
@@ -163,8 +187,8 @@ static int safe_write(int fd, uint8_t *ptr, ssize_t len) {
 
 // image is still BigEndian when it gets here
 static int printImg(uint16_t *image, int out_fd) {
-	uint16_t min_v = (uint16_t) -1;
-	uint16_t max_v = 0;
+	uint16_t min_v = (uint16_t) -1, max_v = 0;
+#ifdef AUTO_SCALE
 	for (int i = 0; i < 60; ++i) {
 		uint16_t *line = &image[i * 80];
 		for (int j = 0; j < 78/*80*/; ++j) {
@@ -177,50 +201,158 @@ static int printImg(uint16_t *image, int out_fd) {
 			}
 		}
 	}
+#else
+	// Hard set
+	min_v = 0x2000;
+	max_v = 0x25C0;
+#endif
 
-	uint16_t scale = max_v - min_v;
-	Mat grayScaleImage(60, 80, CV_8UC1);
-	uint8_t *img_out = (uint8_t *) &grayScaleImage.data[0];
+	//printf("Found min %04X max %04X\n", min_v, max_v);
+
+	Mat grayScaleImage(60, 80, CV_16UC1), colorizedImage(60, 80, CV_16UC3);
+	uint16_t *img_out = (uint16_t *) &grayScaleImage.data[0];
+	const uint16_t scale = max_v - min_v;
+	const float scale_f = 1.0f / scale;
+
+	memcpy(img_out, image, 80 * 60 * sizeof(uint16_t));
+	memset(colorizedImage.data, 0, 60 * 80 * 3 * sizeof(uint16_t));
 	for (int i = 0; i < 60; ++i) {
 		const int idex = i * 80;
-		uint16_t *line = &image[idex];
-		uint8_t *line_out = &img_out[idex];
-		for (int j = 0; j < 78/*80*/; ++j) {
-			line_out[j] = (((line[j] - min_v) << 8) / scale) & 0xFF;
+		uint16_t *line_out = &img_out[idex];
+		uint16_t *line_out_f = (uint16_t *) &colorizedImage.data[i * 80 * sizeof(uint16_t) * 3];
+		// Currently last 2 pixels are bugged...
+		line_out[78] = line_out[79] = min_v;
+
+		for (int j = 0; j < 80; ++j) {
+			if (__builtin_expect(line_out[j] < min_v, 0)) {
+				line_out[j] = min_v;
+			} else if (__builtin_expect(line_out[j] > max_v, 0)) {
+				line_out[j] = max_v;
+			}
+			const float frac = (line_out[j] - min_v) * scale_f;
+			float r = frac - 0.75f, g = frac - 0.5f, b = frac - 0.25f;
+
+			r *= 4.0f;
+			if(r > 0) {
+				r *= -1.0f;
+			}
+			r += 1.5f;
+			if(r < 0.0f) {
+				r = 0.0f;
+			} else if (r > 1.0f) {
+				r = 1.0f;
+			}
+
+			b *= 4.0f;
+			if(b > 0) {
+				b *= -1.0f;
+			}
+			b += 1.5f;
+			if(b < 0.0f) {
+				b = 0.0f;
+			} else if (b > 1.0f) {
+				b = 1.0f;
+			}
+
+			g *= 4.0f;
+			if(g > 0) {
+				g *= -1.0f;
+			}
+			g += 1.5f;
+			if(g < 0.0f) {
+				g = 0.0f;
+			} else if (g > 1.0f) {
+				g = 1.0f;
+			}
+
+			uint16_t *pixel = &line_out_f[3 * j];
+			pixel[0] = b * ((uint16_t)-1);
+			pixel[1] = g * ((uint16_t)-1);
+			pixel[2] = r * ((uint16_t)-1);
 		}
-		line_out[78] = line_out[79] = 0;
 	}
 
-	uint8_t strbuff[1024];
+	uint8_t strbuff[4098 * 4];
+	uint16_t out_len = 0;
 
 	std::vector<uchar> buff;
 	try {
-		if (!imencode(".jpeg", grayScaleImage, buff)) {
+		// TODO: get full 16 bits per channel for high fidelity colors
+		colorizedImage.convertTo(colorizedImage, CV_8U, 1.0/256);
+		if (!imencode(".jpeg", colorizedImage, buff)) {
 			error(0, 0, "Error writing jpeg image to buffer");
 			return -1;
 		}
 	} catch (cv::Exception &ex) {
-		std::cout << "Error writing image: " <<ex.what() << std::endl;
+		std::cout << "Error writing image to buffer: " << ex.what()
+				<< std::endl;
 		return -1;
 	}
 
 	ssize_t out_str_len = snprintf((char *) strbuff, sizeof(strbuff),
-			"Content-Type: image/jpeg\r\nContent-Length: %d\r\n\r\n", buff.size());
-	if (out_str_len < 0) {
+			"Content-Type: image/jpeg\r\nContent-Length: %d\r\n\r\n",
+			buff.size());
+	if (__builtin_expect(out_str_len < 0, 0)) {
 		error(0, errno, "Error writing output header");
 		return -1;
 	}
-	if (safe_write(out_fd, strbuff, out_str_len) < 0) {
+	out_len += out_str_len;
+
+	if (__builtin_expect(
+			sizeof(strbuff)
+					< buff.size() + out_str_len + sizeof(boundary_end_str),
+			0)) {
+		error(0, 0, "Output data too big for buffer! %d bytes in image",
+				(uint32_t) buff.size());
 		return -1;
 	}
-	if (safe_write(out_fd, buff.data(), buff.size()) < 0) {
+	memcpy(&strbuff[out_len], buff.data(), buff.size());
+
+	out_len += buff.size();
+
+	memcpy(&strbuff[out_len], boundary_end_str, sizeof(boundary_end_str) - 1);
+	out_len += sizeof(boundary_end_str) - 1; // Don't include '\0'
+
+	if (safe_write(out_fd, strbuff, out_len) < 0) {
 		return -1;
 	}
-	if (safe_write(out_fd, (uint8_t *) boundary_end_str,
-			sizeof(boundary_end_str) - 1) < 0) {
-		return -1;
-	}
+
 	return 0;
+}
+
+static inline void useRegister(int fid, uint16_t reg) {
+	reg = htons(reg);
+
+	if (ioctl(fid, I2C_SLAVE, 0x2A) < 0) {
+		error(-1, errno, "Error setting slave address");
+	}
+	errno = 0;
+	if (sizeof(uint16_t) != write(fid, &reg, sizeof(uint16_t))) {
+		error(-1, errno, "Error writing register");
+	}
+}
+
+void test_i2c() {
+	int fid = open("/dev/i2c-1", O_RDWR);
+	if (fid == -1) {
+		error(-1, errno, "Could not open /dev/i2c-1");
+	}
+	uint16_t result;
+
+	uint16_t status_reg = 0x0002;
+	useRegister(fid, status_reg);
+
+	if (ioctl(fid, I2C_SLAVE, 0x2A) < 0) {
+		error(-1, errno, "Error setting slave address");
+	}
+	if (sizeof(result) != read(fid, (uint8_t *) &result, sizeof(result))) {
+		error(-1, errno, "Error reading data");
+	}
+	result = ntohs(result);
+	printf("Found result %04X\n", result);
+	if (close(fid) == -1) {
+		error(-1, errno, "Error closing /dev/i2c-1");
+	}
 }
 
 int main(int argc, char **argv) {
@@ -243,6 +375,28 @@ int main(int argc, char **argv) {
 		error(-1, errno, "Error binding to 8888");
 	}
 
+	unsigned int n, m = sizeof(n);
+	if (-1 == getsockopt(socket_fd, SOL_SOCKET, SO_SNDBUF, (void *) &n, &m)) {
+		error(-1, errno, "Error getting socket information");
+	}
+	printf("Socket buffer size %d\n", (int) n);
+	n = 4096; // Small buffers
+	if (-1 == setsockopt(socket_fd,
+	SOL_SOCKET,
+	SO_SNDBUF, (void *) &n, sizeof(n))) {
+		error(-1, errno, "Error setting socket size");
+	}
+
+	if (-1 == getsockopt(socket_fd, SOL_SOCKET, SO_SNDBUF, (void *) &n, &m)) {
+		error(-1, errno, "Error getting socket information");
+	}
+	printf("Socket buffer size reset to %d\n", (int) n);
+	n = 1;
+	if (-1 == setsockopt(socket_fd,
+	IPPROTO_TCP,
+	TCP_NODELAY, (void *) &n, sizeof(n))) {
+		error(-1, errno, "Error setting no delay");
+	}
 	if (-1 == listen(socket_fd, 1)) {
 		error(-1, errno, "Error listening");
 	}
@@ -253,6 +407,8 @@ int main(int argc, char **argv) {
 		error(1, errno, "Error initializing cs on gpio10");
 	}
 	exitIfMRAAError(mraa_gpio_dir(cs, MRAA_GPIO_OUT));
+	//exitIfMRAAError(mraa_gpio_write(cs, 0)); // write CS`
+	//test_i2c();
 	exitIfMRAAError(mraa_gpio_write(cs, 1)); // write CS`
 	printf("Syncing with Lepton...\n");
 	usleep(200000);
@@ -263,6 +419,7 @@ int main(int argc, char **argv) {
 
 	printf("Activating Lepton...\n");
 	int out_fd = -1;
+	char out_buffer[4096] = { 0 };
 	while (isrunning) {
 		if (-1 == out_fd || captureImage(image, cs, fd) < 0) {
 			exitIfMRAAError(mraa_gpio_write(cs, 1)); // High to de-select
@@ -272,9 +429,8 @@ int main(int argc, char **argv) {
 				if (-1 == out_fd) {
 					error(0, errno, "Error accepting socket, retrying");
 				} else {
-					char out_buffer[4096] = { 0 };
 					snprintf(out_buffer, sizeof(out_buffer),
-							"HTTP/1.0 20 OK\r\n"
+							"HTTP/1.1 20 OK\r\n"
 									"Content-Type: multipart/x-mixed-replace;boundary=" BOUNDARY "\r\n"
 							"\r\n--" BOUNDARY "\r\n");
 					int len = strlen(out_buffer);
@@ -292,7 +448,8 @@ int main(int argc, char **argv) {
 		} else {
 			if (frameNum++ % 3 == 0) {
 				if (-1 == printImg(image, out_fd)) {
-					error(0, 0, "Problem with socket, closing. %s", isrunning ? "" : "Also is done");
+					error(0, 0, "Problem with socket, closing. %s",
+							isrunning ? "" : "Also is done");
 					close(out_fd);
 					out_fd = -1;
 				}
@@ -304,6 +461,7 @@ int main(int argc, char **argv) {
 	if (out_fd != -1) {
 		close(out_fd);
 	}
+	printf("Exiting\n");
 	close(fd);
 	return 0;
 }

@@ -447,11 +447,19 @@ int main(int argc, char **argv) {
 			exitIfMRAAError(mraa_gpio_write(cs, 0)); // Select device
 		} else {
 			if (frameNum++ % 3 == 0) {
+				int flag = 1;
+				if(setsockopt(out_fd, SOL_TCP, TCP_CORK, &flag, sizeof(flag))) {
+					error(0, errno, "Error setting TCP_CORK on socket");
+				}
 				if (-1 == printImg(image, out_fd)) {
 					error(0, 0, "Problem with socket, closing. %s",
 							isrunning ? "" : "Also is done");
 					close(out_fd);
 					out_fd = -1;
+				}
+				flag = 0;
+				if(setsockopt(out_fd, SOL_TCP, TCP_CORK, &flag, sizeof(flag))) {
+					error(0, errno, "Error removing TCP_CORK on socket");
 				}
 			}
 		}

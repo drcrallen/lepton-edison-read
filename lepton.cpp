@@ -167,6 +167,8 @@ static int captureImage(uint16_t *image, int fd) {
 	return retval;
 }
 
+#define BROKEN_COLUMN 28
+
 // image is still BigEndian when it gets here
 static int printImg(uint16_t *image, uint16_t *out_image) {
 	uint16_t min_v = (uint16_t) -1, max_v = 0;
@@ -174,6 +176,9 @@ static int printImg(uint16_t *image, uint16_t *out_image) {
 	for (int i = 0; i < 60; ++i) {
 		uint16_t *line = &image[i * 80];
 		for (int j = 0; j < 78/*80*/; ++j) {
+			if (BROKEN_COLUMN == j) {
+				continue;
+			}
 			uint16_t v = line[j] = ntohs(line[j]);
 			if (__builtin_expect(v > max_v, 0)) {
 				max_v = v;
@@ -202,7 +207,7 @@ static int printImg(uint16_t *image, uint16_t *out_image) {
 		uint16_t *line_out = &img_out[idex];
 		uint16_t *line_out_f = (uint16_t *) &out_image[i * 80];
 		// Currently last 2 pixels are bugged...
-		line_out[78] = line_out[79] = min_v;
+		line_out[78] = line_out[79] = line_out[BROKEN_COLUMN] = min_v;
 
 		for (int j = 0; j < 80; ++j) {
 			if (__builtin_expect(line_out[j] < min_v, 0)) {
@@ -246,10 +251,13 @@ static int printImg(uint16_t *image, uint16_t *out_image) {
 				g = 1.0f;
 			}
 
-			uint16_t r_final = ((((uint16_t) (r * ((uint16_t) -1))) >> 3) << 11) & ST7735_RED;
-			uint16_t g_final = ((((uint16_t) (g * ((uint16_t) -1))) >> 2) <<  5) & ST7735_GREEN;
-			uint16_t b_final = ((((uint16_t) (b * ((uint16_t) -1))) >> 3) <<  0) & ST7735_BLUE;
-			line_out_f[j] =r_final | g_final | b_final;
+			uint16_t r_final = ((((uint16_t) (r * ((uint16_t) -1))) >> 3) << 11)
+					& ST7735_RED;
+			uint16_t g_final = ((((uint16_t) (g * ((uint16_t) -1))) >> 2) << 5)
+					& ST7735_GREEN;
+			uint16_t b_final = ((((uint16_t) (b * ((uint16_t) -1))) >> 3) << 0)
+					& ST7735_BLUE;
+			line_out_f[j] = r_final | g_final | b_final;
 		}
 	}
 	return 0;
@@ -300,7 +308,6 @@ ST7735_MAGENTA,
 ST7735_YELLOW,
 ST7735_WHITE };
 
-
 int main(int argc, char **argv) {
 	int lcd_fd = open(ST7735_DEV_NAME, O_WRONLY), lepton_fd = open(
 			LEPTON_DEV_NAME, O_RDONLY);
@@ -321,11 +328,10 @@ int main(int argc, char **argv) {
 	exitIfMRAAError(light.dir(mraa::DIR_OUT_HIGH));
 
 	while (isrunning) {
-
-		exitIfMRAAError(lepton_cs.write(1)); // High to de-select
 		usleep(200000);
 		exitIfMRAAError(lepton_cs.write(0)); // Select device
 		if (captureImage(in_image, lepton_fd)) {
+			exitIfMRAAError(lepton_cs.write(1)); // High to de-select
 			continue;
 		}
 		exitIfMRAAError(lepton_cs.write(1)); // High to de-select
@@ -333,23 +339,19 @@ int main(int argc, char **argv) {
 
 		uint16_t color = colors[std::rand() % 8];
 		uint16_t *out_buff16 = (uint16_t *) out_buff;
-		for(int i = 0; i < 160<<7; ++i) {
+		for (int i = 0; i < 160 << 7; ++i) {
 			out_buff16[i] = color;
 		}
 		for (int i = 0; i < 80; ++i) {
-			for(int j = 0; j < 60; ++j) {
+			for (int j = 0; j < 60; ++j) {
 				const int idex = j * 80 + i;
 				const uint16_t out_val = htons(out_image[idex]);
-				const int ii = i<<1;
-				const int jj = j<<1;
-				uint16_t
-					*line0 = (uint16_t *)&out_buff[(ii + 0)<<8],
-					*line1 = (uint16_t *)&out_buff[(ii + 1)<<8];
-				uint16_t
-					*p00 = &line0[jj + 0],
-					*p01 = &line0[jj + 1],
-					*p11 = &line1[jj + 1],
-					*p10 = &line1[jj + 0];
+				const int ii = i << 1;
+				const int jj = j << 1;
+				uint16_t *line0 = (uint16_t *) &out_buff[(ii + 0) << 8],
+						*line1 = (uint16_t *) &out_buff[(ii + 1) << 8];
+				uint16_t *p00 = &line0[jj + 0], *p01 = &line0[jj + 1], *p11 =
+						&line1[jj + 1], *p10 = &line1[jj + 0];
 				*p00 = *p01 = *p11 = *p10 = out_val;
 			}
 		}

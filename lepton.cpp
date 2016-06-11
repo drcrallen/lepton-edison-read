@@ -34,6 +34,7 @@
 #include <stdio.h>
 #include <mraa.hpp>
 #include <string>
+#include <cstdlib>
 #include <linux/i2c-dev.h>
 #include <arpa/inet.h>
 #include <sys/types.h>
@@ -42,8 +43,10 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <netinet/ip.h>
+#include <chrono>
 #include <opencv2/opencv.hpp>
 #include <opencv2/imgproc/imgproc.hpp>
+#include <upm/st7735.hpp>
 
 // Something doesn't translate properly to VLC
 //#define USE_16BIT_GRAY_RAW
@@ -54,7 +57,8 @@
 using namespace cv;
 using namespace std;
 
-static const char *dev_name = "/dev/lepton";
+static const char *LEPTON_DEV_NAME = "/dev/lepton";
+static const char *ST7735_DEV_NAME = "/dev/st7735";
 void sig_handler(int signum);
 static sig_atomic_t volatile isrunning = 1;
 uint32_t frame_counter = 0;
@@ -98,9 +102,6 @@ static void exitIfMRAAError_internal(int result, const char *filename,
 		case MRAA_ERROR_PLATFORM_NOT_INITIALISED:
 			errMsg = "MRAA_ERROR_PLATFORM_NOT_INITIALISED";
 			break;
-		case MRAA_ERROR_PLATFORM_ALREADY_INITIALISED:
-			errMsg = "MRAA_ERROR_PLATFORM_ALREADY_INITIALISED";
-			break;
 		case MRAA_ERROR_UNSPECIFIED:
 			errMsg = "MRAA_ERROR_UNSPECIFIED";
 			break;
@@ -123,7 +124,7 @@ static void exitIfMRAAError_internal(int result, const char *filename,
  }
  **/
 
-static int captureImage(uint16_t *image, mraa_gpio_context cs, int fd) {
+static int captureImage(uint16_t *image, int fd) {
 	const int line_len = 164;
 	int result, i = 0, retval = 0;
 	uint8_t buff[line_len * 60];
@@ -133,7 +134,7 @@ static int captureImage(uint16_t *image, mraa_gpio_context cs, int fd) {
 		memset(line, 0, line_len);
 		result = read(fd, line, line_len);
 		if (__builtin_expect(result == -1, 0)) {
-			error(0, errno, "Error reading from [%s]", dev_name);
+			error(0, errno, "Error reading from [%s]", LEPTON_DEV_NAME);
 			break;
 		} else if (__builtin_expect(result != line_len, 0)) {
 			error(0, errno, "Size did not match, read %d, expected %d",
@@ -152,7 +153,6 @@ static int captureImage(uint16_t *image, mraa_gpio_context cs, int fd) {
 		} else {
 			// Each line is 1/27/60 of a second's worth of data, which is ~617us. We sleep for 1/12th of this time between tries for a new line.
 			usleep(50);
-			;
 		}
 	}
 	retval = i - 60;
@@ -167,26 +167,8 @@ static int captureImage(uint16_t *image, mraa_gpio_context cs, int fd) {
 	return retval;
 }
 
-#define BOUNDARY "hfihuuhf782hf4278fh2h4f7842hfh87942h"
-
-static const char boundary_end_str[] = "\r\n--" BOUNDARY "\r\n";
-
-static int safe_write(int fd, uint8_t *ptr, ssize_t len) {
-	for (ssize_t write_remaining = len, my_write = 0; write_remaining > 0;
-			write_remaining -= my_write) {
-		my_write = write(fd, ptr, write_remaining);
-		if (__builtin_expect(-1 == my_write, 0)) {
-			// Skip things like EAGAIN for now
-			error(0, errno, "Error writing image data");
-			return -1;
-		}
-		ptr = &ptr[my_write];
-	}
-	return len;
-}
-
 // image is still BigEndian when it gets here
-static int printImg(uint16_t *image, int out_fd) {
+static int printImg(uint16_t *image, uint16_t *out_image) {
 	uint16_t min_v = (uint16_t) -1, max_v = 0;
 #ifdef AUTO_SCALE
 	for (int i = 0; i < 60; ++i) {
@@ -209,17 +191,16 @@ static int printImg(uint16_t *image, int out_fd) {
 
 	//printf("Found min %04X max %04X\n", min_v, max_v);
 
-	Mat grayScaleImage(60, 80, CV_16UC1), colorizedImage(60, 80, CV_16UC3);
+	Mat grayScaleImage(60, 80, CV_16UC1);
 	uint16_t *img_out = (uint16_t *) &grayScaleImage.data[0];
 	const uint16_t scale = max_v - min_v;
 	const float scale_f = 1.0f / scale;
 
 	memcpy(img_out, image, 80 * 60 * sizeof(uint16_t));
-	memset(colorizedImage.data, 0, 60 * 80 * 3 * sizeof(uint16_t));
 	for (int i = 0; i < 60; ++i) {
 		const int idex = i * 80;
 		uint16_t *line_out = &img_out[idex];
-		uint16_t *line_out_f = (uint16_t *) &colorizedImage.data[i * 80 * sizeof(uint16_t) * 3];
+		uint16_t *line_out_f = (uint16_t *) &out_image[i * 80];
 		// Currently last 2 pixels are bugged...
 		line_out[78] = line_out[79] = min_v;
 
@@ -233,90 +214,44 @@ static int printImg(uint16_t *image, int out_fd) {
 			float r = frac - 0.75f, g = frac - 0.5f, b = frac - 0.25f;
 
 			r *= 4.0f;
-			if(r > 0) {
+			if (r > 0) {
 				r *= -1.0f;
 			}
 			r += 1.5f;
-			if(r < 0.0f) {
+			if (r < 0.0f) {
 				r = 0.0f;
 			} else if (r > 1.0f) {
 				r = 1.0f;
 			}
 
 			b *= 4.0f;
-			if(b > 0) {
+			if (b > 0) {
 				b *= -1.0f;
 			}
 			b += 1.5f;
-			if(b < 0.0f) {
+			if (b < 0.0f) {
 				b = 0.0f;
 			} else if (b > 1.0f) {
 				b = 1.0f;
 			}
 
 			g *= 4.0f;
-			if(g > 0) {
+			if (g > 0) {
 				g *= -1.0f;
 			}
 			g += 1.5f;
-			if(g < 0.0f) {
+			if (g < 0.0f) {
 				g = 0.0f;
 			} else if (g > 1.0f) {
 				g = 1.0f;
 			}
 
-			uint16_t *pixel = &line_out_f[3 * j];
-			pixel[0] = b * ((uint16_t)-1);
-			pixel[1] = g * ((uint16_t)-1);
-			pixel[2] = r * ((uint16_t)-1);
+			uint16_t r_final = ((((uint16_t) (r * ((uint16_t) -1))) >> 3) << 11) & ST7735_RED;
+			uint16_t g_final = ((((uint16_t) (g * ((uint16_t) -1))) >> 2) <<  5) & ST7735_GREEN;
+			uint16_t b_final = ((((uint16_t) (b * ((uint16_t) -1))) >> 3) <<  0) & ST7735_BLUE;
+			line_out_f[j] =r_final | g_final | b_final;
 		}
 	}
-
-	uint8_t strbuff[4098 * 4];
-	uint16_t out_len = 0;
-
-	std::vector<uchar> buff;
-	try {
-		// TODO: get full 16 bits per channel for high fidelity colors
-		colorizedImage.convertTo(colorizedImage, CV_8U, 1.0/256);
-		if (!imencode(".jpeg", colorizedImage, buff)) {
-			error(0, 0, "Error writing jpeg image to buffer");
-			return -1;
-		}
-	} catch (cv::Exception &ex) {
-		std::cout << "Error writing image to buffer: " << ex.what()
-				<< std::endl;
-		return -1;
-	}
-
-	ssize_t out_str_len = snprintf((char *) strbuff, sizeof(strbuff),
-			"Content-Type: image/jpeg\r\nContent-Length: %d\r\n\r\n",
-			buff.size());
-	if (__builtin_expect(out_str_len < 0, 0)) {
-		error(0, errno, "Error writing output header");
-		return -1;
-	}
-	out_len += out_str_len;
-
-	if (__builtin_expect(
-			sizeof(strbuff)
-					< buff.size() + out_str_len + sizeof(boundary_end_str),
-			0)) {
-		error(0, 0, "Output data too big for buffer! %d bytes in image",
-				(uint32_t) buff.size());
-		return -1;
-	}
-	memcpy(&strbuff[out_len], buff.data(), buff.size());
-
-	out_len += buff.size();
-
-	memcpy(&strbuff[out_len], boundary_end_str, sizeof(boundary_end_str) - 1);
-	out_len += sizeof(boundary_end_str) - 1; // Don't include '\0'
-
-	if (safe_write(out_fd, strbuff, out_len) < 0) {
-		return -1;
-	}
-
 	return 0;
 }
 
@@ -355,122 +290,93 @@ void test_i2c() {
 	}
 }
 
+const uint16_t colors[] = {
+ST7735_BLACK,
+ST7735_BLUE,
+ST7735_RED,
+ST7735_GREEN,
+ST7735_CYAN,
+ST7735_MAGENTA,
+ST7735_YELLOW,
+ST7735_WHITE };
+
+
 int main(int argc, char **argv) {
-	int fd;
-	uint32_t frameNum = 0;
-	uint16_t image[80 * 60];
-	mraa_gpio_context cs;
-	Size size(80, 60);
-
-	socklen_t sin_size = sizeof(struct sockaddr_in);
-	int socket_fd = socket(PF_INET, SOCK_STREAM, 0);
-	struct sockaddr_in sin, their_sin;
-	sin.sin_family = AF_INET;
-	sin.sin_addr.s_addr = INADDR_ANY;
-	sin.sin_port = htons(8888);
-	memset(&(sin.sin_zero), '\0', 8);
-	if (-1
-			== bind(socket_fd, (const struct sockaddr *) &sin,
-					sizeof(sockaddr_in))) {
-		error(-1, errno, "Error binding to 8888");
+	int lcd_fd = open(ST7735_DEV_NAME, O_WRONLY), lepton_fd = open(
+			LEPTON_DEV_NAME, O_RDONLY);
+	upm::ST7735 *lcd = new upm::ST7735(31, 45, 32, 46);
+	lcd->lcdCSOff();
+	mraa::Gpio lepton_cs = mraa::Gpio(36), light = mraa::Gpio(20);
+	uint16_t in_image[80 * 60], out_image[80 * 60];
+	uint8_t out_buff[160 * 128 * 2];
+	if (lcd_fd == -1) {
+		error(-1, errno, "Error opening %s", ST7735_DEV_NAME);
 	}
 
-	unsigned int n, m = sizeof(n);
-	if (-1 == getsockopt(socket_fd, SOL_SOCKET, SO_SNDBUF, (void *) &n, &m)) {
-		error(-1, errno, "Error getting socket information");
-	}
-	printf("Socket buffer size %d\n", (int) n);
-	n = 4096; // Small buffers
-	if (-1 == setsockopt(socket_fd,
-	SOL_SOCKET,
-	SO_SNDBUF, (void *) &n, sizeof(n))) {
-		error(-1, errno, "Error setting socket size");
+	if (lepton_fd == -1) {
+		error(-1, errno, "Error opening %s", LEPTON_DEV_NAME);
 	}
 
-	if (-1 == getsockopt(socket_fd, SOL_SOCKET, SO_SNDBUF, (void *) &n, &m)) {
-		error(-1, errno, "Error getting socket information");
-	}
-	printf("Socket buffer size reset to %d\n", (int) n);
-	n = 1;
-	if (-1 == setsockopt(socket_fd,
-	IPPROTO_TCP,
-	TCP_NODELAY, (void *) &n, sizeof(n))) {
-		error(-1, errno, "Error setting no delay");
-	}
-	if (-1 == listen(socket_fd, 1)) {
-		error(-1, errno, "Error listening");
-	}
+	exitIfMRAAError(lepton_cs.dir(mraa::DIR_OUT_HIGH));
+	exitIfMRAAError(light.dir(mraa::DIR_OUT_HIGH));
 
-	signal(SIGINT, &sig_handler);
-	cs = mraa_gpio_init(45);
-	if (cs == NULL) {
-		error(1, errno, "Error initializing cs on gpio10");
-	}
-	exitIfMRAAError(mraa_gpio_dir(cs, MRAA_GPIO_OUT));
-	//exitIfMRAAError(mraa_gpio_write(cs, 0)); // write CS`
-	//test_i2c();
-	exitIfMRAAError(mraa_gpio_write(cs, 1)); // write CS`
-	printf("Syncing with Lepton...\n");
-	usleep(200000);
-	fd = open(dev_name, O_RDONLY);
-	if (fd == -1) {
-		error(-1, errno, "Error opening %s", dev_name);
-	}
-
-	printf("Activating Lepton...\n");
-	int out_fd = -1;
-	char out_buffer[4096] = { 0 };
 	while (isrunning) {
-		if (-1 == out_fd || captureImage(image, cs, fd) < 0) {
-			exitIfMRAAError(mraa_gpio_write(cs, 1)); // High to de-select
-			while (-1 == out_fd && isrunning) {
-				out_fd = accept(socket_fd, (struct sockaddr *) &their_sin,
-						&sin_size);
-				if (-1 == out_fd) {
-					error(0, errno, "Error accepting socket, retrying");
-				} else {
-					snprintf(out_buffer, sizeof(out_buffer),
-							"HTTP/1.1 20 OK\r\n"
-									"Content-Type: multipart/x-mixed-replace;boundary=" BOUNDARY "\r\n"
-							"\r\n--" BOUNDARY "\r\n");
-					int len = strlen(out_buffer);
-					if (len != write(out_fd, out_buffer, len)) {
-						error(0, 0, "Error writing bytes");
-						close(out_fd);
-						out_fd = -1;
-					}
-				}
-			};
-			frameNum = 0;
-			// Actually only needs to be ~185ms
-			usleep(200000);
-			exitIfMRAAError(mraa_gpio_write(cs, 0)); // Select device
-		} else {
-			if (frameNum++ % 3 == 0) {
-				int flag = 1;
-				if(setsockopt(out_fd, SOL_TCP, TCP_CORK, &flag, sizeof(flag))) {
-					error(0, errno, "Error setting TCP_CORK on socket");
-				}
-				if (-1 == printImg(image, out_fd)) {
-					error(0, 0, "Problem with socket, closing. %s",
-							isrunning ? "" : "Also is done");
-					close(out_fd);
-					out_fd = -1;
-				}
-				flag = 0;
-				if(setsockopt(out_fd, SOL_TCP, TCP_CORK, &flag, sizeof(flag))) {
-					error(0, errno, "Error removing TCP_CORK on socket");
-				}
+
+		exitIfMRAAError(lepton_cs.write(1)); // High to de-select
+		usleep(200000);
+		exitIfMRAAError(lepton_cs.write(0)); // Select device
+		if (captureImage(in_image, lepton_fd)) {
+			continue;
+		}
+		exitIfMRAAError(lepton_cs.write(1)); // High to de-select
+		printImg(in_image, out_image);
+
+		uint16_t color = colors[std::rand() % 8];
+		uint16_t *out_buff16 = (uint16_t *) out_buff;
+		for(int i = 0; i < 160<<7; ++i) {
+			out_buff16[i] = color;
+		}
+		for (int i = 0; i < 80; ++i) {
+			for(int j = 0; j < 60; ++j) {
+				const int idex = j * 80 + i;
+				const uint16_t out_val = htons(out_image[idex]);
+				const int ii = i<<1;
+				const int jj = j<<1;
+				uint16_t
+					*line0 = (uint16_t *)&out_buff[(ii + 0)<<8],
+					*line1 = (uint16_t *)&out_buff[(ii + 1)<<8];
+				uint16_t
+					*p00 = &line0[jj + 0],
+					*p01 = &line0[jj + 1],
+					*p11 = &line1[jj + 1],
+					*p10 = &line1[jj + 0];
+				*p00 = *p01 = *p11 = *p10 = out_val;
 			}
 		}
+
+		lcd->lcdCSOn();
+		ssize_t written = 0;
+		for (ssize_t remaining = sizeof(out_buff); remaining > 0; remaining -=
+				written) {
+			ssize_t this_write = remaining > 16384 ? 16384 : remaining;
+			written = write(lcd_fd, &out_buff[sizeof(out_buff) - remaining],
+					this_write);
+			if (-1 == written) {
+				lcd->lcdCSOff();
+				error(-1, errno, "Error writing to %s", ST7735_DEV_NAME);
+			}
+		}
+		lcd->lcdCSOff();
+		//sleep(1);
 	}
-	exitIfMRAAError(mraa_gpio_write(cs, 1)); // High to de-select
-	exitIfMRAAError(mraa_gpio_close(cs));
-	if (out_fd != -1) {
-		close(out_fd);
+
+	if (-1 == close(lcd_fd)) {
+		error(0, errno, "Error closing %s", ST7735_DEV_NAME);
 	}
-	printf("Exiting\n");
-	close(fd);
+	if (-1 == close(lepton_fd)) {
+		error(0, errno, "Error closing %s", LEPTON_DEV_NAME);
+	}
+	delete lcd;
 	return 0;
 }
 

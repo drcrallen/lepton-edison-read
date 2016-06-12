@@ -152,7 +152,7 @@ static int captureImage(uint16_t *image, int fd) {
 			++i;
 		} else {
 			// Each line is 1/27/60 of a second's worth of data, which is ~617us. We sleep for 1/12th of this time between tries for a new line.
-			usleep(50);
+			usleep(100);
 		}
 	}
 	retval = i - 60;
@@ -196,18 +196,19 @@ static int printImg(uint16_t *image, uint16_t *out_image) {
 
 	//printf("Found min %04X max %04X\n", min_v, max_v);
 
-	Mat grayScaleImage(60, 80, CV_16UC1);
-	uint16_t *img_out = (uint16_t *) &grayScaleImage.data[0];
+	Mat preScale(60, 80, CV_16UC3);
+	//Mat postBlur(120, 160, CV_16UC3);
+	Mat postScale(120, 160, CV_16UC3);
 	const uint16_t scale = max_v - min_v;
 	const float scale_f = 1.0f / scale;
 
-	memcpy(img_out, image, 80 * 60 * sizeof(uint16_t));
 	for (int i = 0; i < 60; ++i) {
 		const int idex = i * 80;
-		uint16_t *line_out = &img_out[idex];
-		uint16_t *line_out_f = (uint16_t *) &out_image[i * 80];
+		uint16_t *line_out = &image[idex];
 		// Currently last 2 pixels are bugged...
-		line_out[78] = line_out[79] = line_out[BROKEN_COLUMN] = min_v;
+		line_out[78] = line_out[79] = line_out[77];
+		line_out[BROKEN_COLUMN] = (line_out[BROKEN_COLUMN - 1] >> 1)
+				+ (line_out[BROKEN_COLUMN + 1] >> 1);
 
 		for (int j = 0; j < 80; ++j) {
 			if (__builtin_expect(line_out[j] < min_v, 0)) {
@@ -251,13 +252,23 @@ static int printImg(uint16_t *image, uint16_t *out_image) {
 				g = 1.0f;
 			}
 
-			uint16_t r_final = ((((uint16_t) (r * ((uint16_t) -1))) >> 3) << 11)
-					& ST7735_RED;
-			uint16_t g_final = ((((uint16_t) (g * ((uint16_t) -1))) >> 2) << 5)
-					& ST7735_GREEN;
-			uint16_t b_final = ((((uint16_t) (b * ((uint16_t) -1))) >> 3) << 0)
-					& ST7735_BLUE;
-			line_out_f[j] = r_final | g_final | b_final;
+			Vec3w &pixel = preScale.at<Vec3w>(i, j);
+			pixel[0] = r * ((uint16_t)-1);
+			pixel[1] = g * ((uint16_t)-1);
+			pixel[2] = b * ((uint16_t)-1);
+		}
+	}
+	cv::resize(preScale, postScale, postScale.size(), 0, 0, INTER_LINEAR);
+	// WAAAYYYY too slow
+	//cv::fastNlMeansDenoisingColored(postScale, postBlur);
+	for (int i = 0; i < 120; ++i) {
+		uint16_t *line_out_f = (uint16_t *) &out_image[i * 160];
+		for (int j = 0; j < 160; ++j) {
+			Vec3w &pixel = postScale.at<Vec3w>(i, j);
+			uint16_t r_final = (pixel[0] >>  0) & ST7735_RED;
+			uint16_t g_final = (pixel[1] >>  5) & ST7735_GREEN;
+			uint16_t b_final = (pixel[2] >> 11) & ST7735_BLUE;
+			line_out_f[j] = htons(r_final | g_final | b_final);
 		}
 	}
 	return 0;
@@ -314,7 +325,7 @@ int main(int argc, char **argv) {
 	upm::ST7735 *lcd = new upm::ST7735(31, 45, 32, 46);
 	lcd->lcdCSOff();
 	mraa::Gpio lepton_cs = mraa::Gpio(36), light = mraa::Gpio(20);
-	uint16_t in_image[80 * 60], out_image[80 * 60];
+	uint16_t in_image[80 * 60], out_image[160 * 120];
 	uint8_t out_buff[160 * 128 * 2];
 	if (lcd_fd == -1) {
 		error(-1, errno, "Error opening %s", ST7735_DEV_NAME);
@@ -328,6 +339,11 @@ int main(int argc, char **argv) {
 	exitIfMRAAError(light.dir(mraa::DIR_OUT_HIGH));
 
 	while (isrunning) {
+		uint16_t color = colors[std::rand() % 8];
+		uint16_t *out_buff16 = (uint16_t *) out_buff;
+		for (int i = 0; i < 160 << 7; ++i) {
+			out_buff16[i] = color;
+		}
 		usleep(200000);
 		exitIfMRAAError(lepton_cs.write(0)); // Select device
 		if (captureImage(in_image, lepton_fd)) {
@@ -337,22 +353,12 @@ int main(int argc, char **argv) {
 		exitIfMRAAError(lepton_cs.write(1)); // High to de-select
 		printImg(in_image, out_image);
 
-		uint16_t color = colors[std::rand() % 8];
-		uint16_t *out_buff16 = (uint16_t *) out_buff;
-		for (int i = 0; i < 160 << 7; ++i) {
-			out_buff16[i] = color;
-		}
-		for (int i = 0; i < 80; ++i) {
-			for (int j = 0; j < 60; ++j) {
-				const int idex = j * 80 + i;
-				const uint16_t out_val = htons(out_image[idex]);
-				const int ii = i << 1;
-				const int jj = j << 1;
-				uint16_t *line0 = (uint16_t *) &out_buff[(ii + 0) << 8],
-						*line1 = (uint16_t *) &out_buff[(ii + 1) << 8];
-				uint16_t *p00 = &line0[jj + 0], *p01 = &line0[jj + 1], *p11 =
-						&line1[jj + 1], *p10 = &line1[jj + 0];
-				*p00 = *p01 = *p11 = *p10 = out_val;
+		for (int i = 0; i < 160; ++i) {
+			uint16_t *line = (uint16_t *) &out_buff[i << 8];
+			for (int j = 0; j < 120; ++j) {
+				// transpose
+				const int idex = j * 160 + i;
+				line[j] = out_image[idex];
 			}
 		}
 
@@ -369,7 +375,6 @@ int main(int argc, char **argv) {
 			}
 		}
 		lcd->lcdCSOff();
-		//sleep(1);
 	}
 
 	if (-1 == close(lcd_fd)) {

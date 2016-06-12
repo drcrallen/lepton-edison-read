@@ -355,9 +355,10 @@ int main(int argc, char **argv) {
 
 		for (int i = 0; i < 160; ++i) {
 			uint16_t *line = (uint16_t *) &out_buff[i << 8];
+			int offset = 160 - 1 - i;
 			for (int j = 0; j < 120; ++j) {
 				// transpose
-				const int idex = j * 160 + i;
+				const int idex = j * 160 + offset;
 				line[j] = out_image[idex];
 			}
 		}

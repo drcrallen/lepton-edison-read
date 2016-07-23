@@ -1,29 +1,29 @@
 /******************************************************************************
- * Copyright (c) 2016 Charles R. Allen
- *
- * Permission is hereby granted, free of charge, to any person obtaining a copy
- * of this software and associated documentation files (the "Software"), to
- * deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included
- * in all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
- * OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
- * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
- * IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
- * CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
- * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
- * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
- ******************************************************************************
- * lepton.cpp
- *
- *  Created on: Mar 7, 2016
- *      Author: Charles Allen
- */
+* Copyright (c) 2016 Charles R. Allen
+*
+* Permission is hereby granted, free of charge, to any person obtaining a copy
+* of this software and associated documentation files (the "Software"), to
+* deal in the Software without restriction, including without limitation
+* the rights to use, copy, modify, merge, publish, distribute, sublicense,
+* and/or sell copies of the Software, and to permit persons to whom the
+* Software is furnished to do so, subject to the following conditions:
+*
+* The above copyright notice and this permission notice shall be included
+* in all copies or substantial portions of the Software.
+*
+* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+* OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+* IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+* CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+* TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+* SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+******************************************************************************
+* lepton.cpp
+*
+*  Created on: Mar 7, 2016
+*      Author: Charles Allen
+*/
 
 #include <fcntl.h>
 #include <error.h>
@@ -65,7 +65,7 @@ uint32_t frame_counter = 0;
 #define exitIfMRAAError(x) exitIfMRAAError_internal(x, __FILE__, __LINE__)
 
 static void exitIfMRAAError_internal(int result, const char *filename,
-		unsigned int linenum) {
+	unsigned int linenum) {
 	if (__builtin_expect(result != MRAA_SUCCESS, 0)) {
 		const char *errMsg = NULL;
 		switch (result) {
@@ -109,20 +109,20 @@ static void exitIfMRAAError_internal(int result, const char *filename,
 			errMsg = "Completely unknown error in MRAA";
 		}
 		error_at_line(result, errno, filename, linenum, "Error %d in MRAA: %s",
-				(int) result, errMsg);
+			(int)result, errMsg);
 	}
 }
 
 /**
- static void exitIfMRAAError_internal(mraa::Result result, const char *filename,
- unsigned int linenum) {
- exitIfMRAAError_internal((int) result, filename, linenum);
- }
- static void exitIfMRAAError_internal(mraa_result_t result, const char *filename,
- unsigned int linenum) {
- exitIfMRAAError_internal((int) result, filename, linenum);
- }
- **/
+static void exitIfMRAAError_internal(mraa::Result result, const char *filename,
+unsigned int linenum) {
+exitIfMRAAError_internal((int) result, filename, linenum);
+}
+static void exitIfMRAAError_internal(mraa_result_t result, const char *filename,
+unsigned int linenum) {
+exitIfMRAAError_internal((int) result, filename, linenum);
+}
+**/
 
 static int captureImage(uint16_t *image, int fd) {
 	const int line_len = 164;
@@ -130,27 +130,29 @@ static int captureImage(uint16_t *image, int fd) {
 	uint8_t buff[line_len * 60];
 	while (i < 60 && isrunning) {
 		uint8_t *line = &buff[i * line_len];
-		uint16_t *line16 = (uint16_t *) line;
+		uint16_t *line16 = (uint16_t *)line;
 		memset(line, 0, line_len);
 		result = read(fd, line, line_len);
 		if (__builtin_expect(result == -1, 0)) {
 			error(0, errno, "Error reading from [%s]", LEPTON_DEV_NAME);
 			break;
-		} else if (__builtin_expect(result != line_len, 0)) {
+		}
+		else if (__builtin_expect(result != line_len, 0)) {
 			error(0, errno, "Size did not match, read %d, expected %d",
-					(int) result, line_len);
+				(int)result, line_len);
 			break;
 		}
 		line[0] &= 0x0F;
 		if (__builtin_expect(line[0] != 0x0F, 0)) {
 			uint16_t lineNum = ntohs(line16[0]);
 			if (__builtin_expect(i != lineNum, 0)) {
-				printf("Unexpected line. Expected %d found %d\n", (int) i,
-						(int) lineNum);
+				printf("Unexpected line. Expected %d found %d\n", (int)i,
+					(int)lineNum);
 				break;
 			}
 			++i;
-		} else {
+		}
+		else {
 			// Each line is 1/27/60 of a second's worth of data, which is ~617us. We sleep for 1/12th of this time between tries for a new line.
 			usleep(100);
 		}
@@ -171,7 +173,7 @@ static int captureImage(uint16_t *image, int fd) {
 
 // image is still BigEndian when it gets here
 static int printImg(uint16_t *image, uint16_t *out_image) {
-	uint16_t min_v = (uint16_t) -1, max_v = 0;
+	uint16_t min_v = (uint16_t)-1, max_v = 0;
 #ifdef AUTO_SCALE
 	for (int i = 0; i < 60; ++i) {
 		uint16_t *line = &image[i * 80];
@@ -199,7 +201,7 @@ static int printImg(uint16_t *image, uint16_t *out_image) {
 	Mat preScale(60, 80, CV_16UC3);
 	//Mat postBlur(120, 160, CV_16UC3);
 	Mat postScale(120, 160, CV_16UC3);
-	const uint16_t scale = max_v - min_v;
+	const uint16_t scale = (uint16_t) (max_v - min_v);
 	const float scale_f = 1.0f / scale;
 
 	for (int i = 0; i < 60; ++i) {
@@ -207,16 +209,17 @@ static int printImg(uint16_t *image, uint16_t *out_image) {
 		uint16_t *line_out = &image[idex];
 		// Currently last 2 pixels are bugged...
 		line_out[78] = line_out[79] = line_out[77];
-		line_out[BROKEN_COLUMN] = (line_out[BROKEN_COLUMN - 1] >> 1)
-				+ (line_out[BROKEN_COLUMN + 1] >> 1);
+		line_out[BROKEN_COLUMN] = (uint16_t) ((line_out[BROKEN_COLUMN - 1] >> 1)
+			+ (line_out[BROKEN_COLUMN + 1] >> 1));
 
 		for (int j = 0; j < 80; ++j) {
 			if (__builtin_expect(line_out[j] < min_v, 0)) {
 				line_out[j] = min_v;
-			} else if (__builtin_expect(line_out[j] > max_v, 0)) {
+			}
+			else if (__builtin_expect(line_out[j] > max_v, 0)) {
 				line_out[j] = max_v;
 			}
-			const float frac = (line_out[j] - min_v) * scale_f;
+			const float frac = ((float)(line_out[j] - min_v)) * scale_f;
 			float r = frac - 0.75f, g = frac - 0.5f, b = frac - 0.25f;
 
 			r *= 4.0f;
@@ -226,7 +229,8 @@ static int printImg(uint16_t *image, uint16_t *out_image) {
 			r += 1.5f;
 			if (r < 0.0f) {
 				r = 0.0f;
-			} else if (r > 1.0f) {
+			}
+			else if (r > 1.0f) {
 				r = 1.0f;
 			}
 
@@ -237,7 +241,8 @@ static int printImg(uint16_t *image, uint16_t *out_image) {
 			b += 1.5f;
 			if (b < 0.0f) {
 				b = 0.0f;
-			} else if (b > 1.0f) {
+			}
+			else if (b > 1.0f) {
 				b = 1.0f;
 			}
 
@@ -248,25 +253,26 @@ static int printImg(uint16_t *image, uint16_t *out_image) {
 			g += 1.5f;
 			if (g < 0.0f) {
 				g = 0.0f;
-			} else if (g > 1.0f) {
+			}
+			else if (g > 1.0f) {
 				g = 1.0f;
 			}
 
 			Vec3w &pixel = preScale.at<Vec3w>(i, j);
-			pixel[0] = r * ((uint16_t)-1);
-			pixel[1] = g * ((uint16_t)-1);
-			pixel[2] = b * ((uint16_t)-1);
+			pixel[0] = (uint16_t)(r * ((uint16_t)-1));
+			pixel[1] = (uint16_t)(g * ((uint16_t)-1));
+			pixel[2] = (uint16_t)(b * ((uint16_t)-1));
 		}
 	}
 	cv::resize(preScale, postScale, postScale.size(), 0, 0, INTER_LINEAR);
 	// WAAAYYYY too slow
 	//cv::fastNlMeansDenoisingColored(postScale, postBlur);
 	for (int i = 0; i < 120; ++i) {
-		uint16_t *line_out_f = (uint16_t *) &out_image[i * 160];
+		uint16_t *line_out_f = (uint16_t *)&out_image[i * 160];
 		for (int j = 0; j < 160; ++j) {
 			Vec3w &pixel = postScale.at<Vec3w>(i, j);
-			uint16_t r_final = (pixel[0] >>  0) & ST7735_RED;
-			uint16_t g_final = (pixel[1] >>  5) & ST7735_GREEN;
+			uint16_t r_final = (pixel[0] >> 0) & ST7735_RED;
+			uint16_t g_final = (pixel[1] >> 5) & ST7735_GREEN;
 			uint16_t b_final = (pixel[2] >> 11) & ST7735_BLUE;
 			line_out_f[j] = htons(r_final | g_final | b_final);
 		}
@@ -299,7 +305,7 @@ void test_i2c() {
 	if (ioctl(fid, I2C_SLAVE, 0x2A) < 0) {
 		error(-1, errno, "Error setting slave address");
 	}
-	if (sizeof(result) != read(fid, (uint8_t *) &result, sizeof(result))) {
+	if (sizeof(result) != read(fid, (uint8_t *)&result, sizeof(result))) {
 		error(-1, errno, "Error reading data");
 	}
 	result = ntohs(result);
@@ -310,18 +316,18 @@ void test_i2c() {
 }
 
 const uint16_t colors[] = {
-ST7735_BLACK,
-ST7735_BLUE,
-ST7735_RED,
-ST7735_GREEN,
-ST7735_CYAN,
-ST7735_MAGENTA,
-ST7735_YELLOW,
-ST7735_WHITE };
+	ST7735_BLACK,
+	ST7735_BLUE,
+	ST7735_RED,
+	ST7735_GREEN,
+	ST7735_CYAN,
+	ST7735_MAGENTA,
+	ST7735_YELLOW,
+	ST7735_WHITE };
 
 int main(int argc, char **argv) {
 	int lcd_fd = open(ST7735_DEV_NAME, O_WRONLY), lepton_fd = open(
-			LEPTON_DEV_NAME, O_RDONLY);
+		LEPTON_DEV_NAME, O_RDONLY);
 	upm::ST7735 *lcd = new upm::ST7735(31, 45, 32, 46);
 	lcd->lcdCSOff();
 	mraa::Gpio lepton_cs = mraa::Gpio(36), light = mraa::Gpio(20);
@@ -337,24 +343,25 @@ int main(int argc, char **argv) {
 
 	exitIfMRAAError(lepton_cs.dir(mraa::DIR_OUT_HIGH));
 	exitIfMRAAError(light.dir(mraa::DIR_OUT_HIGH));
+	usleep(200000);
 
 	while (isrunning) {
 		uint16_t color = colors[std::rand() % 8];
-		uint16_t *out_buff16 = (uint16_t *) out_buff;
+		uint16_t *out_buff16 = (uint16_t *)out_buff;
 		for (int i = 0; i < 160 << 7; ++i) {
 			out_buff16[i] = color;
 		}
-		usleep(200000);
 		exitIfMRAAError(lepton_cs.write(0)); // Select device
 		if (captureImage(in_image, lepton_fd)) {
 			exitIfMRAAError(lepton_cs.write(1)); // High to de-select
+			//usleep(200000);
 			continue;
 		}
 		exitIfMRAAError(lepton_cs.write(1)); // High to de-select
 		printImg(in_image, out_image);
 
 		for (int i = 0; i < 160; ++i) {
-			uint16_t *line = (uint16_t *) &out_buff[i << 8];
+			uint16_t *line = (uint16_t *)&out_buff[i << 8];
 			int offset = 160 - 1 - i;
 			for (int j = 0; j < 120; ++j) {
 				// transpose
@@ -366,10 +373,10 @@ int main(int argc, char **argv) {
 		lcd->lcdCSOn();
 		ssize_t written = 0;
 		for (ssize_t remaining = sizeof(out_buff); remaining > 0; remaining -=
-				written) {
+			written) {
 			ssize_t this_write = remaining > 16384 ? 16384 : remaining;
 			written = write(lcd_fd, &out_buff[sizeof(out_buff) - remaining],
-					this_write);
+				this_write);
 			if (-1 == written) {
 				lcd->lcdCSOff();
 				error(-1, errno, "Error writing to %s", ST7735_DEV_NAME);

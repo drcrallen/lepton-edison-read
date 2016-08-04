@@ -326,8 +326,16 @@ const uint16_t colors[] = {
 	ST7735_WHITE };
 
 int main(int argc, char **argv) {
-	int lcd_fd = open(ST7735_DEV_NAME, O_WRONLY), lepton_fd = open(
-		LEPTON_DEV_NAME, O_RDONLY);
+	int lcd_fd = open(ST7735_DEV_NAME, O_WRONLY);
+	int lepton_fd = open(LEPTON_DEV_NAME, O_RDONLY);
+	cv::VideoCapture webcam(0);
+	if (!webcam.isOpened()) {
+		error(-1, 0, "Error opening webcam");
+	}
+	Mat webcamData, webcamResized;
+	webcam.set(CV_CAP_PROP_FRAME_WIDTH, 320);
+	webcam.set(CV_CAP_PROP_FRAME_HEIGHT, 240);
+	//webcam.set(CV_CAP_PROP_FPS, 9.0);
 	upm::ST7735 *lcd = new upm::ST7735(31, 45, 32, 46);
 	lcd->lcdCSOff();
 	mraa::Gpio lepton_cs = mraa::Gpio(36), light = mraa::Gpio(20);
@@ -345,8 +353,10 @@ int main(int argc, char **argv) {
 	exitIfMRAAError(light.dir(mraa::DIR_OUT_HIGH));
 	usleep(200000);
 
+	uint64_t color_counter = 0;
+
 	while (isrunning) {
-		uint16_t color = colors[std::rand() % 8];
+		uint16_t color = colors[color_counter++ % sizeof(colors)];
 		uint16_t *out_buff16 = (uint16_t *)out_buff;
 		for (int i = 0; i < 160 << 7; ++i) {
 			out_buff16[i] = color;
@@ -359,7 +369,20 @@ int main(int argc, char **argv) {
 		}
 		exitIfMRAAError(lepton_cs.write(1)); // High to de-select
 		printImg(in_image, out_image);
-
+#if 0
+		if (!webcam.grab()) {
+			error(-1, 0, "Error grabbing webcam");
+		}
+		if (!webcam.retrieve(webcamData)) {
+			error(-1, 0, "Error grabbing webcam");
+		}
+#else
+		if (!webcam.read(webcamData)) {
+			error(-1, 0, "Error reading webcam data");
+		}
+		cv::resize(webcamData, webcamResized, cv::Size(160, 120));
+		// std::cout << "Num channels " << webcamResized.channels() << " Depth " << webcamResized.depth() << std::endl;
+#endif
 		for (int i = 0; i < 160; ++i) {
 			uint16_t *line = (uint16_t *)&out_buff[i << 8];
 			int offset = 160 - 1 - i;
@@ -367,6 +390,11 @@ int main(int argc, char **argv) {
 				// transpose
 				const int idex = j * 160 + offset;
 				line[j] = out_image[idex];
+				Vec3b &pixel = webcamResized.at<Vec3b>(j, i);
+				uint16_t r_final = (((uint16_t)pixel[0]) << 8) & ST7735_RED;
+				uint16_t g_final = (((uint16_t)pixel[1]) << 3) & ST7735_GREEN;
+				uint16_t b_final = (((uint16_t)pixel[2]) >> 3) & ST7735_BLUE;
+				line[j] = (r_final | g_final | b_final);
 			}
 		}
 

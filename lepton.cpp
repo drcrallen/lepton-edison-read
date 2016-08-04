@@ -328,14 +328,12 @@ const uint16_t colors[] = {
 int main(int argc, char **argv) {
 	int lcd_fd = open(ST7735_DEV_NAME, O_WRONLY);
 	int lepton_fd = open(LEPTON_DEV_NAME, O_RDONLY);
-	cv::VideoCapture webcam(0);
-	if (!webcam.isOpened()) {
+	cv::VideoCapture webcam;
+	if (!webcam.open(0)) {
 		error(-1, 0, "Error opening webcam");
 	}
 	Mat webcamData, webcamResized;
-	webcam.set(CV_CAP_PROP_FRAME_WIDTH, 320);
-	webcam.set(CV_CAP_PROP_FRAME_HEIGHT, 240);
-	//webcam.set(CV_CAP_PROP_FPS, 9.0);
+	
 	upm::ST7735 *lcd = new upm::ST7735(31, 45, 32, 46);
 	lcd->lcdCSOff();
 	mraa::Gpio lepton_cs = mraa::Gpio(36), light = mraa::Gpio(20);
@@ -351,6 +349,16 @@ int main(int argc, char **argv) {
 
 	exitIfMRAAError(lepton_cs.dir(mraa::DIR_OUT_HIGH));
 	exitIfMRAAError(light.dir(mraa::DIR_OUT_HIGH));
+
+	webcam.set(CV_CAP_PROP_FRAME_WIDTH, 320);
+	webcam.set(CV_CAP_PROP_FRAME_HEIGHT, 240);
+	webcam.set(CV_CAP_PROP_FORMAT, CV_8UC3);
+
+	if (!webcam.read(webcamData)) {
+		error(-1, 0, "Error reading webcam data");
+	}
+	std::cout << "Num channels " << webcamData.channels() << " Depth " << webcamData.depth() << std::endl;
+
 	usleep(200000);
 
 	uint64_t color_counter = 0;
@@ -381,7 +389,6 @@ int main(int argc, char **argv) {
 			error(-1, 0, "Error reading webcam data");
 		}
 		cv::resize(webcamData, webcamResized, cv::Size(160, 120));
-		// std::cout << "Num channels " << webcamResized.channels() << " Depth " << webcamResized.depth() << std::endl;
 #endif
 		for (int i = 0; i < 160; ++i) {
 			uint16_t *line = (uint16_t *)&out_buff[i << 8];
@@ -394,7 +401,7 @@ int main(int argc, char **argv) {
 				uint16_t r_final = (((uint16_t)pixel[0]) << 8) & ST7735_RED;
 				uint16_t g_final = (((uint16_t)pixel[1]) << 3) & ST7735_GREEN;
 				uint16_t b_final = (((uint16_t)pixel[2]) >> 3) & ST7735_BLUE;
-				line[j] = (r_final | g_final | b_final);
+				line[j] = htons(r_final | g_final | b_final);
 			}
 		}
 
@@ -420,6 +427,7 @@ int main(int argc, char **argv) {
 		error(0, errno, "Error closing %s", LEPTON_DEV_NAME);
 	}
 	delete lcd;
+	webcam.release();
 	return 0;
 }
 
